@@ -71,10 +71,10 @@ def calculate_tfce(
         # Get signs / threshs
         if two_sided_test:
             signs = [-1, 1]
-            max_score = np.max(np.abs(arr3d))
+            max_score = np.nanmax(np.abs(arr3d))
         else:
             signs = [1]
-            max_score = np.max(arr3d)
+            max_score = np.nanmax(arr3d)
 
         step = max_score / 100 if dh == "auto" else dh
 
@@ -326,7 +326,7 @@ def normalize_matrix_on_axis(m, axis=0):
 
     if axis == 0:
         # array transposition preserves the contiguity flag of that array
-        ret = (m.T / np.sqrt(np.sum(m**2, axis=0))[:, np.newaxis]).T
+        ret = (m.T / np.sqrt(np.nansum(m**2, axis=0))[:, np.newaxis]).T
     elif axis == 1:
         ret = normalize_matrix_on_axis(m.T).T
     else:
@@ -376,7 +376,7 @@ def orthonormalize_matrix(m, tol=1.0e-12):
 
 
 def t_score_with_covars_and_normalized_design(
-    tested_vars, target_vars, covars_orthonormalized=None
+    tested_vars, target_vars, covars_orthonormalized=None, target_vars_contain_nans=False,
 ):
     """t-score in the regression of tested variates against target variates.
 
@@ -406,18 +406,31 @@ def t_score_with_covars_and_normalized_design(
         each target variate (in the presence of covars).
 
     """
-    if covars_orthonormalized is None:
-        lost_dof = 0
-    else:
-        lost_dof = covars_orthonormalized.shape[1]
-    # Tested variates are fitted independently,
-    # so lost_dof is unrelated to n_tested_vars.
-    dof = target_vars.shape[0] - lost_dof
-    beta_targetvars_testedvars = np.dot(target_vars.T, tested_vars)
+    dof = target_vars.shape[0]
+    if covars_orthonormalized is not None:
+        # Tested variates are fitted independently,
+        # so degrees of freedom lost to covariates is unrelated to n_tested_vars.
+        dof -= covars_orthonormalized.shape[1]
+    if target_vars_contain_nans:
+        # remove degrees of freedom for missing values
+        dof = (dof - np.isnan(target_vars).sum(axis=0))[:, np.newaxis]
+        
+    beta_targetvars_testedvars = optional_nan_dot(target_vars.T, tested_vars,
+                                                  contains_nans=target_vars_contain_nans)
     if covars_orthonormalized is None:
         rss = 1 - beta_targetvars_testedvars**2
     else:
-        beta_targetvars_covars = np.dot(target_vars.T, covars_orthonormalized)
-        a2 = np.sum(beta_targetvars_covars**2, 1)
+        beta_targetvars_covars = optional_nan_dot(target_vars.T, covars_orthonormalized,
+                                                  contains_nans=target_vars_contain_nans)
+        a2 = np.nansum(beta_targetvars_covars**2, 1)
         rss = 1 - a2[:, np.newaxis] - beta_targetvars_testedvars**2
     return beta_targetvars_testedvars * np.sqrt((dof - 1.0) / rss)
+
+
+def optional_nan_dot(a, b, contains_nans=False):
+    if contains_nans:
+        ret = np.ma.dot(np.ma.array(a, mask=np.isnan(a)),
+                        np.ma.array(b, mask=np.isnan(b))).filled(np.nan)
+    else:
+        ret = np.dot(a, b)
+    return ret

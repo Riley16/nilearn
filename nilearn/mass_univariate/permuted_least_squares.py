@@ -24,6 +24,7 @@ from nilearn.mass_univariate._utils import (
     null_to_p,
     orthonormalize_matrix,
     t_score_with_covars_and_normalized_design,
+    optional_nan_dot,
 )
 
 
@@ -42,6 +43,7 @@ def _permuted_ols_on_chunk(
     tfce=False,
     tfce_original_data=None,
     random_state=None,
+    target_vars_contain_nans=False,
     verbose=0,
 ):
     """Perform massively univariate analysis with permuted OLS on a data chunk.
@@ -207,7 +209,8 @@ def _permuted_ols_on_chunk(
         # OLS regression on randomized data
         perm_scores = np.asfortranarray(
             t_score_with_covars_and_normalized_design(
-                tested_vars, target_vars, confounding_vars
+                tested_vars, target_vars, confounding_vars,
+                target_vars_contain_nans=target_vars_contain_nans,
             )
         )
 
@@ -309,6 +312,7 @@ def permuted_ols(
     masker=None,
     tfce=False,
     threshold=None,
+    fwer=True,
     output_type="legacy",
 ):
     """Massively univariate group analysis with permuted OLS.
@@ -424,6 +428,9 @@ def permuted_ols(
             parallel.
 
         .. versionadded:: 0.9.2
+        
+    fwer : :obj:`bool`, default=False
+        Whether to apply FWER correction.
 
     output_type : {'legacy', 'dict'}, optional
         Determines how outputs should be returned.
@@ -624,7 +631,9 @@ def permuted_ols(
     n_samples, n_regressors = tested_vars.shape
 
     intercept_test = n_regressors == np.unique(tested_vars).size == 1
-
+    
+    target_vars_contain_nans = np.any(np.isnan(target_vars))
+    
     # check if confounding vars contains an intercept
     if confounding_vars is not None:
         # Search for all constant columns
@@ -686,11 +695,13 @@ def permuted_ols(
             warnings.warn("Target variates not C_CONTIGUOUS.")
             targetvars_normalized = np.ascontiguousarray(targetvars_normalized)
 
-        beta_targetvars_covars = np.dot(
-            targetvars_normalized, covars_orthonormalized
+        beta_targetvars_covars = optional_nan_dot(
+            targetvars_normalized, covars_orthonormalized,
+            contains_nans=target_vars_contain_nans,
         )
-        targetvars_resid_covars = targetvars_normalized - np.dot(
-            beta_targetvars_covars, covars_orthonormalized.T
+        targetvars_resid_covars = targetvars_normalized - optional_nan_dot(
+            beta_targetvars_covars, covars_orthonormalized.T, 
+            contains_nans=target_vars_contain_nans,
         )
         targetvars_resid_covars = normalize_matrix_on_axis(
             targetvars_resid_covars, axis=1
@@ -698,11 +709,13 @@ def permuted_ols(
 
         # step 2: extract effect of covars from tested vars
         testedvars_normalized = normalize_matrix_on_axis(tested_vars.T, axis=1)
-        beta_testedvars_covars = np.dot(
-            testedvars_normalized, covars_orthonormalized
+        beta_testedvars_covars = optional_nan_dot(
+            testedvars_normalized, covars_orthonormalized,
+            contains_nans=target_vars_contain_nans,
         )
-        testedvars_resid_covars = testedvars_normalized - np.dot(
-            beta_testedvars_covars, covars_orthonormalized.T
+        testedvars_resid_covars = testedvars_normalized - optional_nan_dot(
+            beta_testedvars_covars, covars_orthonormalized.T,
+            contains_nans=target_vars_contain_nans,
         )
         testedvars_resid_covars = normalize_matrix_on_axis(
             testedvars_resid_covars, axis=1
@@ -715,7 +728,7 @@ def permuted_ols(
     # check arrays contiguousity for the sake of code efficiency
     targetvars_resid_covars = _make_array_contiguous(targetvars_resid_covars)
     testedvars_resid_covars = _make_array_contiguous(testedvars_resid_covars)
-
+    
     # step 3: original regression (= regression on residuals + adjust t-score)
     # compute t score map of each tested var for original data
     # scores_original_data is in samples-by-regressors shape
@@ -723,8 +736,9 @@ def permuted_ols(
         testedvars_resid_covars,
         targetvars_resid_covars.T,
         covars_orthonormalized,
+        target_vars_contain_nans=target_vars_contain_nans,
     )
-
+    
     # Define connectivity for TFCE and/or cluster measures
     bin_struct = generate_binary_structure(3, 1)
 
@@ -797,6 +811,7 @@ def permuted_ols(
             tfce=tfce,
             tfce_original_data=tfce_original_data,
             random_state=rng.randint(1, np.iinfo(np.int32).max - 1),
+            target_vars_contain_nans=target_vars_contain_nans,
             verbose=verbose,
         )
         for thread_id, n_perm_chunk in enumerate(n_perm_chunks)
