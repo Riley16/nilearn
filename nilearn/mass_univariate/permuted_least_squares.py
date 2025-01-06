@@ -25,6 +25,7 @@ from nilearn.mass_univariate._utils import (
     orthonormalize_matrix,
     t_score_with_covars_and_normalized_design,
     optional_nan_dot,
+    replace_nifti_data,
 )
 
 
@@ -44,6 +45,7 @@ def _permuted_ols_on_chunk(
     tfce_original_data=None,
     random_state=None,
     target_vars_contain_nans=False,
+    fwer=True,
     verbose=0,
 ):
     """Perform massively univariate analysis with permuted OLS on a data chunk.
@@ -112,6 +114,9 @@ def _permuted_ols_on_chunk(
 
         .. versionadded:: 0.9.2
 
+    fwer : :obj:`bool`, default=True
+        Whether to apply FWER correction or else to apply no correction to p-values
+        
     tfce_original_data : None or array-like, \
             shape=(n_descriptors, n_regressors), optional
         TFCE values obtained for the original (non-permuted) data.
@@ -188,6 +193,12 @@ def _permuted_ols_on_chunk(
     if threshold is not None:
         h0_csfwe_part = np.empty((n_regressors, n_perm_chunk))
         h0_cmfwe_part = np.empty((n_regressors, n_perm_chunk))
+        
+    if not fwer:
+        # get a masker for converting from 4D to 2D without value-altering transforms
+        from copy import deepcopy
+        simple_masker = deepcopy(masker)
+        simple_masker.set_params(smoothing_fwhm=None, standardize=False, detrend=False)
 
     for i_perm in range(n_perm_chunk):
         if intercept_test:
@@ -221,44 +232,52 @@ def _permuted_ols_on_chunk(
         #  permutation computation)
         # NOTE: This is not done for the cluster-level methods.
         if two_sided_test:
-            # Get maximum absolute value for voxel-level FWE
-            h0_fmax_part[:, i_perm] = np.nanmax(np.fabs(perm_scores), axis=0)
-            scores_as_ranks_part += (
-                h0_fmax_part[:, i_perm].reshape((-1, 1))
-                < np.fabs(scores_original_data).T
-            )
+            h0_f_all = np.fabs(perm_scores)
+            scores = np.fabs(scores_original_data)
         else:
+            h0_f_all = perm_scores
+            scores = scores_original_data
+
+        h0_fmax_part[:, i_perm] = np.nanmax(h0_f_all, axis=0)
+        if fwer:
             # Get maximum value for voxel-level FWE
-            h0_fmax_part[:, i_perm] = np.nanmax(perm_scores, axis=0)
-            scores_as_ranks_part += (
-                h0_fmax_part[:, i_perm].reshape((-1, 1))
-                < scores_original_data.T
-            )
+            h0_f = h0_fmax_part[:, i_perm].reshape((-1, 1))
+        else:
+            h0_f = h0_f_all.T
+        scores_as_ranks_part += h0_f < scores.T
 
         # Prepare data for cluster thresholding
         if tfce or (threshold is not None):
-            arr4d = masker.inverse_transform(perm_scores.T).get_fdata()
+            template_image = masker.inverse_transform(perm_scores.T)
+            arr4d = template_image.get_fdata()
+            if fwer:
+                del template_image
             bin_struct = generate_binary_structure(3, 1)
 
         if tfce:
             # The TFCE map will contain positive and negative values if
             # two_sided_test is True, or positive only if it's False.
             # In either case, the maximum absolute value is the one we want.
-            h0_tfce_part[:, i_perm] = np.nanmax(
-                np.fabs(
-                    calculate_tfce(
-                        arr4d,
-                        bin_struct=bin_struct,
-                        two_sided_test=two_sided_test,
-                    )
-                ),
-                axis=(0, 1, 2),
+            h0_tfce_all = np.fabs(
+                calculate_tfce(
+                    arr4d,
+                    bin_struct=bin_struct,
+                    two_sided_test=two_sided_test,
+                )
             )
-            tfce_scores_as_ranks_part += h0_tfce_part[:, i_perm].reshape(
-                (-1, 1)
-            ) < np.fabs(tfce_original_data.T)
+            
+            h0_tfce_part[:, i_perm] = np.nanmax(h0_tfce_all, axis=(0, 1, 2))
+
+            if fwer:
+                tfce_perm = h0_tfce_part[:, i_perm].reshape((-1, 1))
+            else:
+                h0_tfce_all = replace_nifti_data(template_image, h0_tfce_all)
+                tfce_perm = simple_masker.transform(h0_tfce_all)
+            tfce_scores_as_ranks_part += tfce_perm < np.fabs(tfce_original_data.T)
 
         if threshold is not None:
+            if not fwer:
+                raise NotImplementedError
             (
                 h0_csfwe_part[:, i_perm],
                 h0_cmfwe_part[:, i_perm],
@@ -810,6 +829,7 @@ def permuted_ols(
             two_sided_test=two_sided_test,
             tfce=tfce,
             tfce_original_data=tfce_original_data,
+            fwer=fwer,
             random_state=rng.randint(1, np.iinfo(np.int32).max - 1),
             target_vars_contain_nans=target_vars_contain_nans,
             verbose=verbose,

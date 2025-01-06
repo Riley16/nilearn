@@ -3,6 +3,7 @@
 import numpy as np
 from scipy import linalg
 from scipy.ndimage import label
+from nibabel import Nifti1Image
 
 
 def calculate_tfce(
@@ -434,3 +435,23 @@ def optional_nan_dot(a, b, contains_nans=False):
     else:
         ret = np.dot(a, b)
     return ret
+
+
+def replace_nifti_data(image, new_data):
+    """
+    Creates a new image with data from a 4D ndarray with the affine transform 
+    and header of an original image.
+
+    Parameters:
+    - masker: The NiftiMasker instance used to create the initial NIfTI image.
+    - feature_matrix: The 2D feature matrix obtained from a previous transformation.
+    - new_data: The 4D ndarray to use as the new data for the NIfTI image.
+
+    Returns:
+    - A NIfTI image with the new data.
+    """
+
+    if new_data.shape != image.get_fdata().shape:
+        raise ValueError("New data shape must match the original image shape.")
+    new_image = Nifti1Image(new_data, affine=image.affine, header=image.header)
+    return new_image
