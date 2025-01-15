@@ -24,6 +24,7 @@ from nilearn.mass_univariate._utils import (
     null_to_p,
     orthonormalize_matrix,
     t_score_with_covars_and_normalized_design,
+    tstat_1samp_nan_optimized,
     optional_nan_dot,
     replace_nifti_data,
 )
@@ -218,12 +219,14 @@ def _permuted_ols_on_chunk(
                 confounding_vars = confounding_vars[shuffle_idx]
 
         # OLS regression on randomized data
-        perm_scores = np.asfortranarray(
-            t_score_with_covars_and_normalized_design(
-                tested_vars, target_vars, confounding_vars,
-                target_vars_contain_nans=target_vars_contain_nans,
+        if intercept_test and target_vars_contain_nans:
+            perm_scores = tstat_1samp_nan_optimized(target_vars, axis=0)[:, np.newaxis]
+        else:
+            perm_scores = t_score_with_covars_and_normalized_design(
+                    tested_vars, target_vars, confounding_vars,
+                    target_vars_contain_nans=target_vars_contain_nans,
             )
-        )
+        perm_scores = np.asfortranarray(perm_scores)
 
         # find the rank of the original scores in h0_fmax_part
         # (when n_descriptors or n_perm are large, it can be quite long to
@@ -694,9 +697,15 @@ def permuted_ols(
         else:
             confounding_vars = np.ones((n_samples, 1))
 
+    if target_vars_contain_nans and not intercept_test:
+        raise NotImplementedError
+    
     # OLS regression on original data
     covars_orthonormalized = None
     if confounding_vars is not None:
+        if target_vars_contain_nans:
+            # this use case was partially implemented but never tested
+            raise NotImplementedError
         # step 1: extract effect of covars from target vars
         covars_orthonormalized = orthonormalize_matrix(confounding_vars)
         if not covars_orthonormalized.flags["C_CONTIGUOUS"]:
@@ -739,7 +748,12 @@ def permuted_ols(
         testedvars_resid_covars = normalize_matrix_on_axis(
             testedvars_resid_covars, axis=1
         ).T.copy()
-
+        
+    elif intercept_test and target_vars_contain_nans:
+        # can't use normalized tested_vars with t_score_with_covars_and_normalized_design
+        # since normalization does not account for locations of NaNs in target_vars...
+        targetvars_resid_covars = target_vars.copy().T
+        testedvars_resid_covars = tested_vars.copy()
     else:
         targetvars_resid_covars = normalize_matrix_on_axis(target_vars).T
         testedvars_resid_covars = normalize_matrix_on_axis(tested_vars).copy()
@@ -751,12 +765,18 @@ def permuted_ols(
     # step 3: original regression (= regression on residuals + adjust t-score)
     # compute t score map of each tested var for original data
     # scores_original_data is in samples-by-regressors shape
-    scores_original_data = t_score_with_covars_and_normalized_design(
-        testedvars_resid_covars,
-        targetvars_resid_covars.T,
-        covars_orthonormalized,
-        target_vars_contain_nans=target_vars_contain_nans,
-    )
+    if intercept_test and target_vars_contain_nans:
+        scores_original_data = tstat_1samp_nan_optimized(targetvars_resid_covars, axis=1)[:, np.newaxis]
+        # from scipy.stats import ttest_1samp
+        # res = ttest_1samp(targetvars_resid_covars, popmean=0, axis=1, nan_policy='omit')
+        # scores_original_data = res[0][:, np.newaxis]
+    else:
+        scores_original_data = t_score_with_covars_and_normalized_design(
+            testedvars_resid_covars,
+            targetvars_resid_covars.T,
+            covars_orthonormalized,
+            target_vars_contain_nans=target_vars_contain_nans,
+        )
     
     # Define connectivity for TFCE and/or cluster measures
     bin_struct = generate_binary_structure(3, 1)
@@ -811,7 +831,7 @@ def permuted_ols(
     threshold_t = _compute_t_stat_threshold(
         threshold, two_sided_test, tested_vars, confounding_vars
     )
-
+    
     # actual permutations, seeded from a random integer between 0 and maximum
     # value represented by np.int32 (to have a large entropy).
     ret = joblib.Parallel(n_jobs=n_jobs, verbose=verbose)(

@@ -425,7 +425,30 @@ def t_score_with_covars_and_normalized_design(
                                                   contains_nans=target_vars_contain_nans)
         a2 = np.nansum(beta_targetvars_covars**2, 1)
         rss = 1 - a2[:, np.newaxis] - beta_targetvars_testedvars**2
+
     return beta_targetvars_testedvars * np.sqrt((dof - 1.0) / rss)
+
+
+def tstat_1samp_nan_optimized(data, popmean=0, axis=0, return_pvalues=False, alternative='two-sided'):
+    # replacement for scipy.stats.tstat_1samp, which is slow for sparse arrays with many NaNs
+    mu = np.nanmean(data, axis=axis)
+    std = np.nanstd(data, axis=axis, ddof=1)
+    dfs = np.logical_not(np.isnan(data)).sum(axis=axis)
+    tstat = mu / std * np.sqrt(dfs)
+    if return_pvalues:
+        dfs -= 1
+        t_df = t_distribution(dfs)
+        if alternative == 'greater':
+            pvalues = 1 - t_df.cdf(tstat)
+        elif alternative == 'less':
+            pvalues = t_df.cdf(tstat)
+        elif alternative == 'two-sided':
+            pvalues = 2 * (1 - t_df.cdf(np.abs(tstat)))
+        else:
+            raise ValueError
+        return tstat, dfs, pvalues
+    else:
+        return tstat
 
 
 def optional_nan_dot(a, b, contains_nans=False):
